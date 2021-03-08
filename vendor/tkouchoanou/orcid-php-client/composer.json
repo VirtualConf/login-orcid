@@ -1,0 +1,24 @@
+{
+    "name": "tkouchoanou/orcid-php-client",
+    "description": "Library for ORCID web services",
+    "keywords": ["orcid", "php", "oauth","client","work","record"],
+    "license": "MIT",
+    "require": {
+        "php": ">=7.0.0",
+        "ext-curl": "*",
+        "ext-json": "*",
+        "ext-mbstring": "*",
+       "ext-simplexml": "*",
+       "ext-dom": "*"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "4.*",
+        "satooshi/php-coveralls": "1.0.*",
+        "mockery/mockery": "0.9.*"
+    },
+    "autoload": {
+        "psr-4": {
+            "Orcid\\": "src/"
+        }
+    }
+}

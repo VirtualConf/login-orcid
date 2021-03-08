@@ -1,0 +1,494 @@
+<?php namespace ProcessWire;
+
+/**
+ * Login for ORCID
+ * 
+ * Based on Login for Facebook, originally developed by Ryan Cramer
+ * ORCID code by Simon Duerr using 
+ * uses orcid-php-client by Sam Wilson <samwilson@purdue.edu>  modified by Kouchoanou Théophane 
+ * MIT License
+ * 
+ * 
+ * Module configuration properties
+ * -------------------------------
+ * @property string $appID 
+ * @property string $appSecret
+ * @property bool|int $createUsers
+ * @property int $afterLoginPageID
+ * @property int $errorLoginPageID
+ * @property int $commonUserName
+ * @property string $userNameFormat
+ * @property array $addRoles
+ * @property array $disallowRoles
+ * @property array $disallowPermissions
+ *
+ * Module internal use properties 
+ * ------------------------------
+ * @property string $pageName
+ * @property string $templateName
+ * @property string $fieldName
+ * @property string $roleName
+ *
+ * 
+ * Runtime generated properties
+ * ----------------------------
+ * @property string $url The full http URL to the /login-orcid/ page. 
+
+ * Hookable methods 
+ * ----------------
+ * @method string execute()
+ * @method User|bool login(array $userData)
+ * @method bool allowLogin(User $user)
+ * @method User createNewUser(array $userData)
+ * @method int updateUser(User $user, array $userData)
+ * 
+ *
+ * 
+ */
+
+class LoginOrcid extends WireData implements Module, ConfigurableModule {
+
+	public static function getModuleInfo() {
+		return array(
+			'title' => 'Login for ORCID',
+			'version' => 2,
+			'summary' => 'Enables login via ORCID account and PW user creation.',
+			'requires' => 'ProcessWire>=3.0.42'
+		);
+	}
+	
+	
+
+	/**
+	 * Construct and set config defaults
+	 * 
+	 */
+	public function __construct() {
+		
+		$this->set('appID', '');
+		$this->set('appSecret', '');
+		$this->set('createUsers', 1); 
+		$this->set('afterLoginPageID', 0);
+		$this->set('commonUserName', '');
+		$this->set('userNameFormat', 'full');
+		$this->set('addRoles', array());
+		$this->set('disallowRoles', array('superuser'));
+		$this->set('disallowPermissions', array('page-edit')); 
+		
+
+		
+		
+		$name = strtolower(str_replace('Login', 'login-', $this->className()));
+		
+		$this->set('pageName', $name);
+		$this->set('roleName', $name);
+		$this->set('templateName', $name);
+		$this->set('fieldName', str_replace('-', '_', $name) . '_id'); 
+		
+		parent::__construct();
+	}
+
+
+	
+
+	/**
+	 * Main program execution
+	 * 
+	 * @throws LoginOrcidException
+	 * @return bool Returns true if user is logged in (or already logged in w/Orcid) or false if not
+	 * 
+	 */
+	public function ___execute() {
+	
+
+		$appID = $this->appID;
+		$appSecret = $this->appSecret;
+		$pageURL = $this->wire('page')->httpUrl();
+		
+		$session = $this->wire('session');
+		$input = $this->wire('input');
+		$user = $this->wire('user');
+		$code = $this->wire('sanitizer')->alphanumeric($input->get('code')); 
+	
+		// check if user is already logged in with ORCID
+		if($this->isLoggedIn()) {
+			$this->afterLoginRedirect($user);
+			return true;
+		}
+		require 'vendor/autoload.php';
+		if(empty($code)) {
+			// start a login: redirect to ORCID
+			$oauth = new \Orcid\Oauth;
+
+			$redirectUri=$pageURL;
+			$oauth->setClientId($appID)
+				->setScope('/authenticate')
+				->showLogin()
+				->setRedirectUri($redirectUri);
+			header("Location: " . $oauth->getAuthorizationUrl());
+			return false;
+		}
+		
+		$oauth = new \Orcid\Oauth;
+		//$oauth->useSandboxEnvironment();
+		
+	
+		$redirectUri=$pageURL;
+
+		$oauth->setClientId($appID)
+      	->setClientSecret($appSecret)
+      	->setRedirectUri($redirectUri);
+		
+		$oauth->authenticate($code);
+		if ($oauth->isAuthenticated()){
+			$orcid = new \Orcid\Profile($oauth);
+			// Get ORCID iD
+			$id = $orcid->id();
+			$email = $orcid->email();
+			$name  = $orcid->fullName();
+			
+			$affiliation  = $orcid->affiliation();
+			
+		}else{
+			$this->logException("Failed to login");
+		}
+
+	
+		// with access token now available, we can request user data
+		$userData = array("email"=>$email,
+						"orcid"=>$id,
+						"name"=>$name, 
+					"affiliation"=>$affiliation);
+		//dump($userData);
+
+		if(!$this->login($userData)) {
+			$this->logException("Orcid to ProcessWire login failed"); 
+		}
+		
+		return true;
+	}
+
+	
+
+	/**
+	 * Process a ORCID login
+	 * 
+	 * @param $userData
+	 * @return User|bool Returns User on success, or false if no user was able to be logged in
+	 * @throws LoginOrcidException
+	 * 
+	 */
+	protected function ___login(array $userData) {
+		
+		$this->log("Trying login for $userData[email] , $userData[orcid], $userData[name]");
+		$loggedIn = $this->wire('user')->isLoggedin();
+		$session = $this->wire('session');
+
+		if(empty($userData['orcid'])) throw new LoginOrcidException("No orcid user ID");
+
+		// Check if user with this orcid has an account
+		if(!$loggedIn) {
+			$u = $this->wire('users')->get("$this->fieldName=$userData[orcid]");
+		}
+		$signup_deadline=$this->pages->get("/settings/")->signup_deadline;
+		
+		$userExists=False;
+		if($loggedIn) {
+			// user is already logged in, we update it
+			$this->log('user is already logged in, we update it');
+
+			$u = $this->wire('user');
+			$this->updateUser($u, $userData);
+			$userExists=True;
+			
+		} else if($u->id) {
+			// user already has an orcid login
+			// we update with the Data returned from Orcid
+			$this->log('user has orcid, updating it');
+			$this->updateUser($u, $userData);
+			$userExists=True;
+			
+		} else if ( strtotime("now")<$signup_deadline){
+			// User does not exist yet, we create new user if signup still possible
+			$this->log('user does not exist, signup deadline '.strtotime("now").$signup_deadline);
+			$u = $this->createNewUser($userData);
+			
+			if(empty($userData['email']) && $u->email==""){
+				$emailSet=False;
+				$this->log("email empty");
+			}else{
+				$emailSet=True;
+				$this->log("email populated");
+			}
+		}
+		 else{
+			$session = $this->wire('session');
+			$session->redirect($this->wire('config')->httpUrl . '/sign-in/?declined=yes');
+
+			$this->log("No sign up possible for $userData[name]"); 
+			return false;
+		}
+
+		
+
+		if($loggedIn) {
+			$loginUser = $u;
+			$this->log("Already logged-in user connected to ORCID account: $u->login_orcid_id"); 
+		} else if($this->allowLogin($u)) {
+			// force login this user
+			$loginUser = $this->wire('session')->forceLogin($u);
+			if($loginUser && $loginUser->id) {
+				$this->log("Used Orcid to login for user: $loginUser->name");
+				$session->setFor($this, 'forceLogin', true); 
+				$this->afterLoginRedirect($loginUser, $userExists, $emailSet);
+				return true;
+			}
+
+		} else {
+			$this->log("User is not allowed to login: $u->name"); 		
+			throw new LoginOrcidException($this->_('This account is not allowed to login with ORCID')); 
+		}
+		
+		
+		return false;
+
+	}
+	
+	protected function afterLoginRedirect(User $loginUser, $userExists, $emailSet) {
+		
+		if($this->wire('input')->get('login') === 'orcid') return false;
+
+		$session = $this->wire('session');
+		if ($userExists){
+			$session->redirect($this->wire('config')->httpUrl . '/sign-in/');
+		}else if (!$emailSet && !$userExists){
+			$session->redirect($this->wire('config')->httpUrl . '/sign-in/?profile=1&login=orcid&noemail=1');
+		} else {
+			$session->redirect($this->wire('config')->httpUrl . '/sign-in/?profile=1&login=orcid&noemail=0');
+		}
+		return true;
+	}
+
+	/**
+	 * Allow this user to use Orcid login?
+	 * 
+	 * @param User $user
+	 * @return bool
+	 * 
+	 */
+	protected function ___allowLogin(User $user) {
+		
+		$allow = true;
+		$note = '';
+		
+		foreach($this->disallowRoles as $name) {
+			if($user->hasRole($name)) {
+				$allow = false;
+				$note = $name;
+				break;
+			}
+		}
+		
+		if(!$allow) {
+			$this->log("Role '$note' prevents user from login: $user->name"); 
+			return false;
+		}
+		
+		foreach($this->disallowPermissions as $name) {
+			if($user->hasPermission($name)) {
+				$allow = false;
+				$note = $name;
+				break;
+			}
+		}
+		
+		if(!$allow) {
+			$this->log("Permission '$note' prevents user from login: $user->name"); 
+		}
+		
+		return $allow;
+	}
+
+	/**
+	 * Create a new user
+	 * 
+	 * @param array $userData
+	 * @return User
+	 * 
+	 */
+	protected function ___createNewUser(array $userData) {
+		$userName = "$userData[name]";
+		$userName = $this->wire('sanitizer')->pageName($userName, true);
+		$_userName = $userName;
+		$cnt = 0;
+
+		do {
+			$u = $this->wire('users')->get("name=$userName");
+			if(!$u->id) break; // success, no user matches this name, can exit loop
+			// existing user matches this name, so we need to try for another user name
+			$userName = $_userName . '-' . (++$cnt);
+			$userData['name'] = $userName;
+		} while($u->id);
+
+		// generate random password
+		$password = new Password();
+		$pass = $password->randomPass(array(
+			'minLength' => 7,
+			'maxLength' => 15,
+			'minUpper' => 1,
+			'maxUpper' => 3,
+			'minLower' => 1,
+			'minDigits' => 1,
+			'maxDigits' => 0,
+			'minSymbols' => 0,
+			'maxSymbols' => 3,
+		));
+		// create new user
+		$u = new User();
+		$u->name = $userName;
+		if(!empty($userData['name'])) $u->set('fullname', $userData['name']);
+		
+		if(!empty($userData['affiliation'])) $u->set('affiliation', $userData['affiliation']);
+		
+		$u->set('orcid', $userData['orcid']);
+		$u->pass = $pass;
+		$u->addRole($this->roleName);
+		if(!empty($userData['email'])) $u->set('email', $userData['email']);
+		$u->save();
+
+		if($u->id) {
+			$this->log("Created new user: $userName"); 
+			$this->updateUser($u, $userData);
+		}
+		
+		return $u;
+	}
+
+	/**
+	 * Update a user to make it consistent with Orcid data
+	 * 
+	 * @param User $user
+	 * @param array $userData
+	 * @return int Number of changes saved
+	 * 
+	 */
+	protected function ___updateUser(User $user, array $userData) {
+		
+		$updates = array();
+		$of = $user->of();
+		if($of) $user->of(false);
+		
+		if(!$user->hasRole($this->roleName)) {
+			$user->addRole($this->roleName);
+			$updates[] = "role:$this->roleName";
+		}
+		
+		foreach($this->addRoles as $roleName) {
+			if(!$user->hasRole($roleName)) {
+				$user->addRole($roleName);
+				$updates[] = "role:$roleName";
+			}
+		}
+
+	
+			
+			if($user->get($this->fieldName) != $userData['orcid']) {
+				$user->set($this->fieldName, $userData['orcid']);
+				$updates[] = $this->fieldName;
+			}
+
+			$user->set('fullname', $userData['name']);
+			$updates[] = 'fullname';
+	
+		if(count($updates)) {
+			$user->save();
+			$this->log("Updated user '$user->name' fields: " . implode(', ', $updates));
+		}
+		
+		if($of) $user->of(true);
+		
+		return count($updates);
+	}
+	
+
+
+	
+	
+	/**
+	 * Log an error and throw a LoginOrcidException
+	 * 
+	 * @param string $msg
+	 * @throws LoginOrcidException
+	 * 
+	 */
+	protected function logException($msg) {
+		$this->log($msg); 
+		throw new LoginOrcidException($msg);
+	}
+
+	/**
+	 * Returns whether or not user is logged in AND connected to a ORCID account
+	 * 
+	 * - Returns boolean true if user was autenticated entirely by ORCID.
+	 * - Returns integer 1 if user logged into PW directly, before ORCID.
+	 * - Returns boolean false if no ORCID login is active (PW login may still be active). 
+	 * 
+	 * @return bool|int
+	 * 
+	 */
+	public function isLoggedIn() {
+		$user = $this->wire('user');
+		if(!$user->isLoggedin()) return false;
+		if(!$user->hasRole($this->roleName)) return false;
+		if(!$this->wire('session')->getFor($this, 'accessToken')) return false;
+		// return boolean true if PW login was forced (i.e. user authenticated only by Orcid)
+		if($this->wire('session')->getFor($this, 'forceLogin')) return true;
+		// return integer 1 if user logged into and was authenticated by ProcessWire
+		return 1;
+	}
+
+	/**
+	 * Module configuration
+	 * 
+	 * @param InputfieldWrapper $inputfields
+	 * 
+	 */
+	public function getModuleConfigInputfields(InputfieldWrapper $inputfields) {
+		$this->installer()->check();
+		require_once(__DIR__ . '/config.php');
+		$cfg = new LoginOrcidConfigure($this);
+		$cfg->getInputfields($inputfields);
+	}
+
+
+	/**
+	 * Module installation
+	 * 
+	 * @throws WireException
+	 * 
+	 */
+	public function install() {
+		$this->installer()->install();
+	}
+
+	/**
+	 * Uninstall module
+	 * 
+	 */
+	public function uninstall() {
+		$this->installer()->uninstall();
+	}
+
+	/**
+	 * Return installer
+	 * 
+	 * @return LoginOrcidInstaller
+	 * 
+	 */
+	protected function installer() {
+		require_once(__DIR__ . '/install.php');
+		return new LoginOrcidInstaller($this);
+	}
+}
+
+class LoginOrcidException extends WireException {}
