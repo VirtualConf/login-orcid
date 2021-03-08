@@ -53,15 +53,6 @@ private static $installed = array (
       ),
       'reference' => '26e02ae62c43239aa7f27262fc09cb7558dd5bbf',
     ),
-    'tracy/tracy' => 
-    array (
-      'pretty_version' => 'v2.8.3',
-      'version' => '2.8.3.0',
-      'aliases' => 
-      array (
-      ),
-      'reference' => '342674bbf72365e8456de9855a8cd839ca695933',
-    ),
   ),
 );
 private static $canGetVendors;
